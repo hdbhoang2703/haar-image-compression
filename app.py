@@ -9,7 +9,7 @@ def main():
     st.markdown("Upload ảnh rồi chọn mức độ nén (threshold).")
 
     uploaded_file = st.file_uploader("📁 Chọn ảnh", type=["png", "jpg", "jpeg"])
-    threshold = st.slider("Chọn threshold", min_value=1, max_value=100, value=30)
+    threshold = st.slider("Chọn threshold", min_value=1, max_value=500, value=30)
 
     if uploaded_file is not None:
         # Đọc ảnh gốc
