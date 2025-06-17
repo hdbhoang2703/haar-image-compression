@@ -27,7 +27,7 @@ def main():
         haar_compressor.compress_image_by_threshold(image_path, threshold)
 
         # Lấy ảnh nén dưới dạng PIL.Image
-        compressed_pil = Image.fromarray(haar_compressor.compressed_image[..., ::-1])
+        compressed_pil = Image.fromarray(haar_compressor.compressed_image)
 
         # Lưu ảnh nén vào buffer
         compressed_io = io.BytesIO()

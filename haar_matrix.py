@@ -1,7 +1,8 @@
 import numpy as np
 from PIL import Image
 import os
-import cv2
+import argparse
+import sys
 
 class HaarCompressor:
     def __init__(self, output_dir=None):
@@ -14,18 +15,20 @@ class HaarCompressor:
         self.original_image = None
         self.compressed_image = None
         self.compression_stats = None
+        self.last_save_path = None
 
     def _ensure_numpy_image(self, image_input):
-        """Chuyển ảnh thành numpy.ndarray"""
+        """Chuyển ảnh thành numpy.ndarray bằng PIL"""
         if isinstance(image_input, np.ndarray):
             return image_input
         elif isinstance(image_input, Image.Image):  # PIL Image
             return np.array(image_input)
         elif isinstance(image_input, str):  # path
-            img = cv2.imread(image_input)
-            if img is None:
-                raise ValueError(f"Không thể đọc ảnh từ: {image_input}")
-            return img
+            try:
+                img = Image.open(image_input).convert("RGB")
+                return np.array(img)
+            except Exception as e:
+                raise ValueError(f"Không thể đọc ảnh từ: {image_input} ({e})")
         else:
             raise ValueError("Không hỗ trợ định dạng ảnh này.")
 
@@ -130,7 +133,7 @@ class HaarCompressor:
         if best['threshold'] is None:
             raise ValueError(f"No threshold found to achieve PSNR >= {self.target_psnr} dB.")
 
-        psnr_list, zero_list, recon_ch = [], [], []
+        recon_ch, psnr_list, zero_list = [], [], []
         for chan in channels:
             _, recon, psnr, zero_pct = self.compress_channel(chan, best['threshold'])
             recon_ch.append(recon)
@@ -138,9 +141,7 @@ class HaarCompressor:
             zero_list.append(zero_pct)
 
         recon_img = recon_ch[0] if len(recon_ch) == 1 else np.stack(recon_ch, axis=2)
-        recon_img = np.clip(recon_img, 0, 255).astype(np.uint8)
-
-        self.compressed_image = recon_img
+        self.compressed_image = np.clip(recon_img, 0, 255).astype(np.uint8)
         self.best_params = best
         self.compression_stats = {'psnr_list': psnr_list, 'zero_list': zero_list}
         return self.compressed_image
@@ -149,7 +150,7 @@ class HaarCompressor:
         self.original_image = self._ensure_numpy_image(image_input)
         channels = [self.original_image] if self.original_image.ndim == 2 else [self.original_image[:, :, c] for c in range(3)]
 
-        psnr_list, zero_list, recon_ch = [], [], []
+        recon_ch, psnr_list, zero_list = [], [], []
         for chan in channels:
             _, recon, psnr, zero_pct = self.compress_channel(chan, threshold)
             recon_ch.append(recon)
@@ -157,20 +158,19 @@ class HaarCompressor:
             zero_list.append(zero_pct)
 
         compressed_image = recon_ch[0] if len(recon_ch) == 1 else np.stack(recon_ch, axis=2)
-        compressed_image = np.clip(compressed_image, 0, 255).astype(np.uint8)
-
-        self.compressed_image = compressed_image
+        self.compressed_image = np.clip(compressed_image, 0, 255).astype(np.uint8)
         self.best_params = {'threshold': threshold}
         self.compression_stats = {'psnr_list': psnr_list, 'zero_list': zero_list}
-        return compressed_image
+        return self.compressed_image
 
     def display_results(self):
+        import matplotlib.pyplot as plt
         fig, axs = plt.subplots(1, 2, figsize=(8, 4))
         titles = ['Original', 'Reconstructed']
         images = [self.original_image, self.compressed_image]
 
         for ax, img, title in zip(axs, images, titles):
-            ax.imshow(cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_BGR2RGB), cmap='gray')
+            ax.imshow(img.astype(np.uint8))
             ax.set_title(title)
             ax.axis('off')
 
@@ -179,26 +179,65 @@ class HaarCompressor:
 
     def save_reconstructed_image(self):
         name, ext = os.path.splitext(os.path.basename(self.image_path))
-        out_path = os.path.join(self.output_dir or "", f"{name}_recon{ext}")
-        if self.output_dir:
-            os.makedirs(self.output_dir, exist_ok=True)
+        out_dir = self.output_dir or os.getcwd()
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"{name}_recon{ext}")
 
-        image_to_save = (
-            cv2.cvtColor(self.compressed_image, cv2.COLOR_BGR2RGB)
-            if self.compressed_image.ndim == 3 else self.compressed_image
-        )
         mode = 'L' if self.compressed_image.ndim == 2 else 'RGB'
-        Image.fromarray(image_to_save, mode=mode).save(out_path)
+        Image.fromarray(self.compressed_image, mode=mode).save(out_path)
+        self.last_save_path = out_path
         return out_path
 
-    def get_compression_info(self):
-        if not (self.best_params or self.compression_stats):
-            return "No compression performed yet."
+    def estimate_last_save_size(self):
+        """Return the file size in bytes of the last saved reconstructed image."""
+        if not self.last_save_path or not os.path.exists(self.last_save_path):
+            raise RuntimeError("No reconstructed image file found. Save an image first.")
+        return os.path.getsize(self.last_save_path)
 
-        info = {
+    def get_compression_info(self):
+        if not self.best_params:
+            return None
+        return {
             'levels': self.levels,
             'target_psnr': self.target_psnr,
-            **(self.best_params or {}),
-            **(self.compression_stats or {})
+            **self.best_params,
+            **self.compression_stats
         }
-        return info
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Compress images using Haar wavelet transform with optional PSNR target or fixed threshold."
+    )
+    parser.add_argument('image_path', help='Path to the input image')
+    parser.add_argument('-p', '--psnr', type=float, default=30,
+                        help='Target PSNR value for automatic threshold selection (default: 30)')
+    parser.add_argument('-t', '--threshold', type=float,
+                        help='Fixed threshold for compression (overrides PSNR target)')
+    parser.add_argument('-o', '--output_dir', type=str,
+                        help='Directory to save the reconstructed image')
+    args = parser.parse_args()
+
+    compressor = HaarCompressor(output_dir=args.output_dir)
+    try:
+        if args.threshold is not None:
+            compressor.compress_image_by_threshold(args.image_path, args.threshold)
+        else:
+            compressor.compress_image(args.image_path, target_psnr=args.psnr)
+
+        out_path = compressor.save_reconstructed_image()
+        size_bytes = compressor.estimate_last_save_size()
+        info = compressor.get_compression_info()
+
+        print(f"Reconstructed image saved to: {out_path}")
+        print(f"File size: {size_bytes} bytes")
+        print("Compression stats:")
+        for k, v in info.items():
+            print(f"  {k}: {v}")
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
